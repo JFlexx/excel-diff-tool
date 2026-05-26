@@ -27,7 +27,7 @@ from src.core.diff_engine import (
     is_formula,
     recompute_cell_status,
 )
-from src.ui.styles import COLOR_EQUAL, STATUS_COLOR
+from src.ui.styles import cell_color, detect_theme
 
 
 MAX_DISPLAY_CELLS = 500_000  # safety cap: above this we warn the user
@@ -63,11 +63,21 @@ class DiffView(QWidget):
     right_modified = Signal()
     selection_changed = Signal(int, int, str)  # row, col, status
 
-    def __init__(self, ws_left, ws_right, sheet_diff: SheetDiff, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        ws_left,
+        ws_right,
+        sheet_diff: SheetDiff,
+        left_name: str = "A",
+        right_name: str = "B",
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.ws_left = ws_left      # may be None if sheet absent on left
         self.ws_right = ws_right    # may be None if sheet absent on right
         self.sheet_diff = sheet_diff
+        self.left_name = left_name
+        self.right_name = right_name
         self._syncing_scroll = False
         self._syncing_sel = False
         self._programmatic = False
@@ -84,25 +94,25 @@ class DiffView(QWidget):
         layout.setSpacing(0)
 
         if self.sheet_diff.presence != SheetPresence.BOTH:
+            theme = detect_theme()
             banner = QFrame()
             banner.setFrameShape(QFrame.Shape.StyledPanel)
-            banner.setStyleSheet("background:#FFF4CE; padding:6px;")
+            banner.setStyleSheet(f"background:{theme.modified.name()}; padding:6px;")
             bl = QHBoxLayout(banner)
             bl.setContentsMargins(8, 4, 8, 4)
-            side = "antiguo" if self.sheet_diff.presence == SheetPresence.ONLY_LEFT else "nuevo"
+            existing = self.left_name if self.sheet_diff.presence == SheetPresence.ONLY_LEFT else self.right_name
             bl.addWidget(QLabel(
-                f"Esta hoja solo existe en el fichero <b>{side}</b>. "
+                f"Esta hoja solo existe en <b>{existing}</b>. "
                 f"La comparación celda a celda no aplica."
             ))
             layout.addWidget(banner)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.left_table = self._make_table("Antiguo")
-        self.right_table = self._make_table("Nuevo")
+        self.left_table = self._make_table(self.left_name)
+        self.right_table = self._make_table(self.right_name)
 
-        # Wrap each table with a header label
-        splitter.addWidget(self._wrap_with_header(self.left_table, "ANTIGUO"))
-        splitter.addWidget(self._wrap_with_header(self.right_table, "NUEVO"))
+        splitter.addWidget(self._wrap_with_header(self.left_table, self.left_name))
+        splitter.addWidget(self._wrap_with_header(self.right_table, self.right_name))
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
@@ -112,12 +122,18 @@ class DiffView(QWidget):
         v = QVBoxLayout(wrap)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
+        theme = detect_theme()
         lbl = QLabel(title)
         f = QFont()
         f.setBold(True)
         lbl.setFont(f)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet("background:#2D5C8C; color:white; padding:4px;")
+        lbl.setStyleSheet(
+            f"background:{theme.header_bg.name()};"
+            f"color:{theme.header_fg.name()};"
+            f"padding:4px;"
+        )
+        lbl.setToolTip(title)
         v.addWidget(lbl)
         v.addWidget(table, 1)
         return wrap
@@ -144,17 +160,15 @@ class DiffView(QWidget):
         rows = max(sd.max_row, 1)
         cols = max(sd.max_col, 1)
 
-        # Safety cap: huge sheets would create millions of QTableWidgetItems and freeze the app.
         if rows * cols > MAX_DISPLAY_CELLS:
-            # Expand bounds to at least include all diff cells, then trim.
             if sd.diffs:
                 rows = max(k[0] for k in sd.diffs)
                 cols = max(k[1] for k in sd.diffs)
-            # Hard cap as last resort
             while rows * cols > MAX_DISPLAY_CELLS and rows > 1:
                 rows = max(rows // 2, 1)
+            theme = detect_theme()
             cap_banner = QFrame()
-            cap_banner.setStyleSheet("background:#FADBD8; padding:6px;")
+            cap_banner.setStyleSheet(f"background:{theme.modified.name()}; padding:6px;")
             cl = QHBoxLayout(cap_banner)
             cl.setContentsMargins(8, 4, 8, 4)
             cl.addWidget(QLabel(
@@ -185,11 +199,9 @@ class DiffView(QWidget):
                 rv = self.ws_right.cell(r, c).value if self.ws_right is not None else None
                 self._set_item(self.left_table, r, c, lv)
                 self._set_item(self.right_table, r, c, rv)
-        # Color diff cells
         for (r, c), status in sd.diffs.items():
-            color = STATUS_COLOR[status.value]
-            self._paint(self.left_table, r, c, color)
-            self._paint(self.right_table, r, c, color)
+            self._paint(self.left_table, r, c, cell_color(status.value, "left"))
+            self._paint(self.right_table, r, c, cell_color(status.value, "right"))
         self.left_table.blockSignals(False)
         self.right_table.blockSignals(False)
         self._programmatic = False
@@ -345,15 +357,13 @@ class DiffView(QWidget):
         key = (r, c)
         if new_status == DiffStatus.EQUAL:
             self.sheet_diff.diffs.pop(key, None)
-            color = COLOR_EQUAL
         else:
             self.sheet_diff.diffs[key] = new_status
-            color = STATUS_COLOR[new_status.value]
         self._programmatic = True
         self.left_table.blockSignals(True)
         self.right_table.blockSignals(True)
-        self._paint(self.left_table, r, c, color)
-        self._paint(self.right_table, r, c, color)
+        self._paint(self.left_table, r, c, cell_color(new_status.value, "left"))
+        self._paint(self.right_table, r, c, cell_color(new_status.value, "right"))
         self.left_table.blockSignals(False)
         self.right_table.blockSignals(False)
         self._programmatic = False

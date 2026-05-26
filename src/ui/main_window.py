@@ -45,11 +45,21 @@ class TabPanel(QWidget):
     right_modified = Signal()
     selection_changed = Signal(int, int, str)
 
-    def __init__(self, sheet_diff: SheetDiff, wb_left, wb_right, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        sheet_diff: SheetDiff,
+        wb_left,
+        wb_right,
+        left_name: str,
+        right_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.sheet_diff = sheet_diff
         self.wb_left = wb_left
         self.wb_right = wb_right
+        self.left_name = left_name
+        self.right_name = right_name
         self.view: DiffView | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -64,7 +74,11 @@ class TabPanel(QWidget):
         name = self.sheet_diff.name
         ws_l = self.wb_left[name] if self.wb_left is not None and name in self.wb_left.sheetnames else None
         ws_r = self.wb_right[name] if self.wb_right is not None and name in self.wb_right.sheetnames else None
-        self.view = DiffView(ws_l, ws_r, self.sheet_diff, parent=self)
+        self.view = DiffView(
+            ws_l, ws_r, self.sheet_diff,
+            left_name=self.left_name, right_name=self.right_name,
+            parent=self,
+        )
         self.view.left_modified.connect(self.left_modified)
         self.view.right_modified.connect(self.right_modified)
         self.view.selection_changed.connect(self.selection_changed)
@@ -98,7 +112,7 @@ class DiffWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Comparador Excel CAF")
+        self.setWindowTitle("Excel Diff Tool")
         self.resize(1500, 900)
 
         self.wb_left = None
@@ -106,6 +120,8 @@ class MainWindow(QMainWindow):
         self.diff: WorkbookDiff | None = None
         self.left_dirty = False
         self.right_dirty = False
+        self.left_name = "A"
+        self.right_name = "B"
         self._tab_sheet_names: list[str] = []
         self._thread: QThread | None = None
         self._worker: DiffWorker | None = None
@@ -141,18 +157,18 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(box)
         layout.setContentsMargins(8, 6, 8, 6)
 
-        layout.addWidget(QLabel("Antiguo:"))
+        layout.addWidget(QLabel("Fichero A:"))
         self.left_path = QLineEdit()
-        self.left_path.setPlaceholderText("Selecciona el Excel antiguo…")
+        self.left_path.setPlaceholderText("Primer Excel a comparar…")
         layout.addWidget(self.left_path, 1)
         btn_l = QPushButton("Examinar…")
         btn_l.clicked.connect(lambda: self._pick_file(self.left_path))
         layout.addWidget(btn_l)
 
         layout.addSpacing(12)
-        layout.addWidget(QLabel("Nuevo:"))
+        layout.addWidget(QLabel("Fichero B:"))
         self.right_path = QLineEdit()
-        self.right_path.setPlaceholderText("Selecciona el Excel nuevo…")
+        self.right_path.setPlaceholderText("Segundo Excel a comparar…")
         layout.addWidget(self.right_path, 1)
         btn_r = QPushButton("Examinar…")
         btn_r.clicked.connect(lambda: self._pick_file(self.right_path))
@@ -174,15 +190,15 @@ class MainWindow(QMainWindow):
         bold = QFont()
         bold.setBold(True)
 
-        self.btn_copy_to_left = QPushButton("◀  Tomar del nuevo")
-        self.btn_copy_to_left.setToolTip("Copia el valor de la celda seleccionada del nuevo al antiguo. (Alt+Izquierda)")
+        self.btn_copy_to_left = QPushButton("◀  Tomar de B")
+        self.btn_copy_to_left.setToolTip("Copia el valor de la celda seleccionada de B a A. (Alt+Izquierda)")
         self.btn_copy_to_left.setMinimumHeight(34)
         self.btn_copy_to_left.setFont(bold)
         self.btn_copy_to_left.clicked.connect(self._copy_to_left)
         layout.addWidget(self.btn_copy_to_left)
 
-        self.btn_copy_to_right = QPushButton("Tomar del antiguo  ▶")
-        self.btn_copy_to_right.setToolTip("Copia el valor de la celda seleccionada del antiguo al nuevo. (Alt+Derecha)")
+        self.btn_copy_to_right = QPushButton("Tomar de A  ▶")
+        self.btn_copy_to_right.setToolTip("Copia el valor de la celda seleccionada de A a B. (Alt+Derecha)")
         self.btn_copy_to_right.setMinimumHeight(34)
         self.btn_copy_to_right.setFont(bold)
         self.btn_copy_to_right.clicked.connect(self._copy_to_right)
@@ -203,7 +219,7 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
 
         self.cell_label = QLabel("—")
-        self.cell_label.setStyleSheet("color:#444; padding:0 8px;")
+        self.cell_label.setStyleSheet("padding:0 8px;")
         layout.addWidget(self.cell_label)
 
         return box
@@ -217,13 +233,13 @@ class MainWindow(QMainWindow):
         self.stats_label = QLabel("Sin comparación.")
         layout.addWidget(self.stats_label, 1)
 
-        self.btn_save_left = QPushButton("Guardar antiguo")
-        self.btn_save_left.setMinimumWidth(170)
+        self.btn_save_left = QPushButton("Guardar A")
+        self.btn_save_left.setMinimumWidth(200)
         self.btn_save_left.clicked.connect(lambda: self._save_side("left"))
         layout.addWidget(self.btn_save_left)
 
-        self.btn_save_right = QPushButton("Guardar nuevo")
-        self.btn_save_right.setMinimumWidth(170)
+        self.btn_save_right = QPushButton("Guardar B")
+        self.btn_save_right.setMinimumWidth(200)
         self.btn_save_right.clicked.connect(lambda: self._save_side("right"))
         layout.addWidget(self.btn_save_right)
 
@@ -293,6 +309,8 @@ class MainWindow(QMainWindow):
         self.diff = diff
         self.left_dirty = False
         self.right_dirty = False
+        self.left_name, self.right_name = self._derive_display_names(diff.left_path, diff.right_path)
+        self._update_named_actions()
         self._populate_tabs()
         self._refresh_stats()
         self._refresh_action_state()
@@ -300,6 +318,32 @@ class MainWindow(QMainWindow):
         if diff.total_diffs == 0:
             msg = "Los ficheros son idénticos."
         self.statusBar().showMessage(msg)
+
+    @staticmethod
+    def _derive_display_names(left_path: str, right_path: str) -> tuple[str, str]:
+        l = os.path.basename(left_path)
+        r = os.path.basename(right_path)
+        if l == r:
+            # Same basename in different folders: disambiguate by parent folder.
+            l = f"{os.path.basename(os.path.dirname(left_path))}/{l}"
+            r = f"{os.path.basename(os.path.dirname(right_path))}/{r}"
+        return l, r
+
+    @staticmethod
+    def _short(name: str, limit: int = 28) -> str:
+        if len(name) <= limit:
+            return name
+        return name[: limit - 1] + "…"
+
+    def _update_named_actions(self) -> None:
+        a = self._short(self.left_name)
+        b = self._short(self.right_name)
+        self.btn_copy_to_left.setText(f"◀  Tomar de {b}")
+        self.btn_copy_to_left.setToolTip(f"Copia el valor de la celda seleccionada de «{self.right_name}» a «{self.left_name}». (Alt+Izquierda)")
+        self.btn_copy_to_right.setText(f"Tomar de {a}  ▶")
+        self.btn_copy_to_right.setToolTip(f"Copia el valor de la celda seleccionada de «{self.left_name}» a «{self.right_name}». (Alt+Derecha)")
+        self.btn_save_left.setText(f"Guardar {a}")
+        self.btn_save_right.setText(f"Guardar {b}")
 
     # ---------- Tabs ----------
 
@@ -313,7 +357,7 @@ class MainWindow(QMainWindow):
 
         for name, sd in self.diff.sheets.items():
             self._tab_sheet_names.append(name)
-            panel = TabPanel(sd, self.wb_left, self.wb_right)
+            panel = TabPanel(sd, self.wb_left, self.wb_right, self.left_name, self.right_name)
             panel.left_modified.connect(lambda p=panel: self._on_panel_modified(p, "left"))
             panel.right_modified.connect(lambda p=panel: self._on_panel_modified(p, "right"))
             panel.selection_changed.connect(self._on_selection_changed)
@@ -325,9 +369,9 @@ class MainWindow(QMainWindow):
 
     def _format_tab_label(self, sd: SheetDiff) -> str:
         if sd.presence == SheetPresence.ONLY_LEFT:
-            return f"{sd.name}  ◐ solo antiguo"
+            return f"{sd.name}  ◐ solo en A"
         if sd.presence == SheetPresence.ONLY_RIGHT:
-            return f"{sd.name}  ◑ solo nuevo"
+            return f"{sd.name}  ◑ solo en B"
         if sd.diff_count == 0:
             return f"{sd.name}  ✓"
         return f"{sd.name}  ({sd.diff_count})"
@@ -400,8 +444,8 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, row: int, col: int, status: str) -> None:
         label_map = {
             "modified": "Modificada",
-            "only_left": "Solo en antiguo",
-            "only_right": "Solo en nuevo",
+            "only_left": f"Solo en {self._short(self.left_name)}",
+            "only_right": f"Solo en {self._short(self.right_name)}",
             "equal": "Igual",
         }
         self.cell_label.setText(f"Celda {cell_coord(row, col)}  ·  {label_map.get(status, '')}")
@@ -415,9 +459,9 @@ class MainWindow(QMainWindow):
         total = sum(sd.diff_count for sd in self.diff.sheets.values())
         bits = [f"{total} celdas con diferencias"]
         if self.left_dirty:
-            bits.append("Antiguo modificado ●")
+            bits.append(f"{self._short(self.left_name)} modificado ●")
         if self.right_dirty:
-            bits.append("Nuevo modificado ●")
+            bits.append(f"{self._short(self.right_name)} modificado ●")
         self.stats_label.setText("  ·  ".join(bits))
 
     def _refresh_action_state(self) -> None:
@@ -430,10 +474,11 @@ class MainWindow(QMainWindow):
         self.btn_prev.setEnabled(has_view)
         self.btn_save_left.setEnabled(self.wb_left is not None)
         self.btn_save_right.setEnabled(self.wb_right is not None)
-        # Asterisks for dirty
-        self.btn_save_left.setText("Guardar antiguo ●" if self.left_dirty else "Guardar antiguo")
-        self.btn_save_right.setText("Guardar nuevo ●" if self.right_dirty else "Guardar nuevo")
-        title = "Comparador Excel CAF"
+        a = self._short(self.left_name)
+        b = self._short(self.right_name)
+        self.btn_save_left.setText(f"Guardar {a} ●" if self.left_dirty else f"Guardar {a}")
+        self.btn_save_right.setText(f"Guardar {b} ●" if self.right_dirty else f"Guardar {b}")
+        title = "Excel Diff Tool"
         if self.left_dirty or self.right_dirty:
             title += "  *"
         self.setWindowTitle(title)
