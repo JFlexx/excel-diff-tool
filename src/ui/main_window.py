@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSplitter,
     QStatusBar,
     QTabWidget,
     QToolButton,
@@ -33,6 +34,7 @@ from src.core.diff_engine import (
     cell_coord,
     compute_workbook_diff,
 )
+from src.ui.detail_panel import DetailPanel
 from src.ui.diff_view import DiffView
 
 
@@ -43,7 +45,7 @@ class TabPanel(QWidget):
     """
     left_modified = Signal()
     right_modified = Signal()
-    selection_changed = Signal(int, int, str)
+    selection_changed = Signal(int, int, str, object, object)
 
     def __init__(
         self,
@@ -144,7 +146,16 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        root.addWidget(self.tabs, 1)
+
+        self.detail = DetailPanel()
+
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.addWidget(self.tabs)
+        v_split.addWidget(self.detail)
+        v_split.setStretchFactor(0, 4)
+        v_split.setStretchFactor(1, 1)
+        v_split.setSizes([600, 180])
+        root.addWidget(v_split, 1)
 
         root.addWidget(self._build_save_bar())
 
@@ -441,7 +452,7 @@ class MainWindow(QMainWindow):
         self._refresh_stats()
         self._refresh_action_state()
 
-    def _on_selection_changed(self, row: int, col: int, status: str) -> None:
+    def _on_selection_changed(self, row: int, col: int, status: str, left_value, right_value) -> None:
         label_map = {
             "modified": "Modificada",
             "only_left": f"Solo en {self._short(self.left_name)}",
@@ -449,6 +460,10 @@ class MainWindow(QMainWindow):
             "equal": "Igual",
         }
         self.cell_label.setText(f"Celda {cell_coord(row, col)}  ·  {label_map.get(status, '')}")
+        self.detail.show_cell(
+            cell_coord(row, col), status, left_value, right_value,
+            self.left_name, self.right_name,
+        )
 
     # ---------- Stats / state ----------
 

@@ -61,7 +61,7 @@ def _parse_text(text: str) -> Any:
 class DiffView(QWidget):
     left_modified = Signal()
     right_modified = Signal()
-    selection_changed = Signal(int, int, str)  # row, col, status
+    selection_changed = Signal(int, int, str, object, object)  # row, col, status, left_value, right_value
 
     def __init__(
         self,
@@ -267,8 +267,12 @@ class DiffView(QWidget):
     def _emit_selection(self, r: int, c: int) -> None:
         if r < 0 or c < 0:
             return
-        st = self.sheet_diff.diffs.get((r + 1, c + 1), DiffStatus.EQUAL)
-        self.selection_changed.emit(r + 1, c + 1, st.value)
+        row = r + 1
+        col = c + 1
+        st = self.sheet_diff.diffs.get((row, col), DiffStatus.EQUAL)
+        lv = self.ws_left.cell(row, col).value if self.ws_left is not None else None
+        rv = self.ws_right.cell(row, col).value if self.ws_right is not None else None
+        self.selection_changed.emit(row, col, st.value, lv, rv)
 
     # ---------- Inline edits ----------
 
