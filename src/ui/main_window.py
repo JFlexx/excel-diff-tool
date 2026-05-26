@@ -46,6 +46,7 @@ class TabPanel(QWidget):
     left_modified = Signal()
     right_modified = Signal()
     selection_changed = Signal(int, int, str, object, object)
+    alignment_changed = Signal()
 
     def __init__(
         self,
@@ -84,6 +85,7 @@ class TabPanel(QWidget):
         self.view.left_modified.connect(self.left_modified)
         self.view.right_modified.connect(self.right_modified)
         self.view.selection_changed.connect(self.selection_changed)
+        self.view.alignment_changed.connect(self.alignment_changed)
         layout = self.layout()
         layout.removeWidget(self._placeholder)
         self._placeholder.deleteLater()
@@ -372,6 +374,7 @@ class MainWindow(QMainWindow):
             panel.left_modified.connect(lambda p=panel: self._on_panel_modified(p, "left"))
             panel.right_modified.connect(lambda p=panel: self._on_panel_modified(p, "right"))
             panel.selection_changed.connect(self._on_selection_changed)
+            panel.alignment_changed.connect(lambda p=panel: self._on_panel_alignment_changed(p))
             self.tabs.addTab(panel, self._format_tab_label(sd))
         self.tabs.blockSignals(False)
         if self.tabs.count() > 0:
@@ -420,6 +423,13 @@ class MainWindow(QMainWindow):
         idx = self.tabs.indexOf(panel)
         if idx >= 0:
             self._on_side_modified(idx, side)
+
+    def _on_panel_alignment_changed(self, panel: TabPanel) -> None:
+        idx = self.tabs.indexOf(panel)
+        if idx >= 0:
+            self._refresh_tab_label(idx)
+        self.detail.set_idle()
+        self._refresh_stats()
 
     # ---------- Actions ----------
 

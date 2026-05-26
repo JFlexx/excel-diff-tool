@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -19,12 +20,14 @@ from PySide6.QtWidgets import (
 from openpyxl.utils import get_column_letter
 
 from src.core.diff_engine import (
+    AlignmentMode,
     DiffStatus,
     SheetDiff,
     SheetPresence,
     cell_coord,
     format_value,
     is_formula,
+    realign_sheet,
     recompute_cell_status,
 )
 from src.ui.styles import cell_color, detect_theme
@@ -62,6 +65,7 @@ class DiffView(QWidget):
     left_modified = Signal()
     right_modified = Signal()
     selection_changed = Signal(int, int, str, object, object)  # row, col, status, left_value, right_value
+    alignment_changed = Signal()  # emitted after re-alignment so the host can refresh labels
 
     def __init__(
         self,
@@ -81,10 +85,15 @@ class DiffView(QWidget):
         self._syncing_scroll = False
         self._syncing_sel = False
         self._programmatic = False
+        self._cap_banner: QWidget | None = None
         self._build_ui()
         self._populate()
         self._wire_sync()
         self._install_shortcuts()
+
+    def refresh(self) -> None:
+        """Re-render after the underlying SheetDiff has been re-aligned."""
+        self._populate()
 
     # ---------- UI ----------
 
@@ -92,6 +101,9 @@ class DiffView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        if self.sheet_diff.presence == SheetPresence.BOTH:
+            layout.addWidget(self._build_alignment_bar())
 
         if self.sheet_diff.presence != SheetPresence.BOTH:
             theme = detect_theme()
@@ -138,6 +150,92 @@ class DiffView(QWidget):
         v.addWidget(table, 1)
         return wrap
 
+    # ---------- Alignment bar ----------
+
+    def _build_alignment_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setFrameShape(QFrame.Shape.NoFrame)
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(4, 2, 4, 2)
+        bl.setSpacing(6)
+
+        bl.addWidget(QLabel("Alineación:"))
+        self.align_combo = QComboBox()
+        self.align_combo.addItem("Por posición (fila → fila)", AlignmentMode.POSITIONAL.value)
+        self.align_combo.addItem("Por columna clave (emparejar por valor)", AlignmentMode.KEY_BASED.value)
+        self.align_combo.currentIndexChanged.connect(self._on_align_choice)
+        bl.addWidget(self.align_combo)
+
+        bl.addSpacing(8)
+        self.key_label = QLabel("Columna clave:")
+        bl.addWidget(self.key_label)
+        self.key_combo = QComboBox()
+        self.key_combo.setMinimumWidth(220)
+        self.key_combo.currentIndexChanged.connect(self._on_key_changed)
+        bl.addWidget(self.key_combo)
+
+        self._populate_key_combo()
+        self._sync_alignment_controls()
+
+        bl.addStretch(1)
+        return bar
+
+    def _populate_key_combo(self) -> None:
+        self.key_combo.blockSignals(True)
+        self.key_combo.clear()
+        cols = max(self.sheet_diff.src_max_col_left, self.sheet_diff.src_max_col_right) or self.sheet_diff.max_col
+        header_row = self.sheet_diff.header_row or 1
+        for c in range(1, cols + 1):
+            letter = get_column_letter(c)
+            header_text: str | None = None
+            if self.ws_left is not None:
+                v = self.ws_left.cell(header_row, c).value
+                if v is not None and str(v).strip():
+                    header_text = str(v)
+            if header_text is None and self.ws_right is not None:
+                v = self.ws_right.cell(header_row, c).value
+                if v is not None and str(v).strip():
+                    header_text = str(v)
+            label = f"{letter}: {header_text}" if header_text else letter
+            self.key_combo.addItem(label, c)
+        self.key_combo.blockSignals(False)
+
+    def _sync_alignment_controls(self) -> None:
+        """Reflect the SheetDiff's current alignment mode and key in the combos."""
+        is_key = self.sheet_diff.alignment_mode == AlignmentMode.KEY_BASED
+        self.align_combo.blockSignals(True)
+        self.align_combo.setCurrentIndex(1 if is_key else 0)
+        self.align_combo.blockSignals(False)
+        self.key_combo.setEnabled(is_key)
+        self.key_label.setEnabled(is_key)
+        if is_key and self.sheet_diff.key_column is not None:
+            idx = self.sheet_diff.key_column - 1
+            if 0 <= idx < self.key_combo.count():
+                self.key_combo.blockSignals(True)
+                self.key_combo.setCurrentIndex(idx)
+                self.key_combo.blockSignals(False)
+
+    def _on_align_choice(self, _idx: int) -> None:
+        mode = AlignmentMode(self.align_combo.currentData())
+        self.key_combo.setEnabled(mode == AlignmentMode.KEY_BASED)
+        self.key_label.setEnabled(mode == AlignmentMode.KEY_BASED)
+        key_col = self.key_combo.currentData() if mode == AlignmentMode.KEY_BASED else None
+        self._apply_alignment(mode, key_col)
+
+    def _on_key_changed(self, _idx: int) -> None:
+        mode = AlignmentMode(self.align_combo.currentData())
+        if mode != AlignmentMode.KEY_BASED:
+            return
+        self._apply_alignment(mode, self.key_combo.currentData())
+
+    def _apply_alignment(self, mode: AlignmentMode, key_col: int | None) -> None:
+        if self.ws_left is None or self.ws_right is None:
+            return
+        realign_sheet(self.sheet_diff, self.ws_left, self.ws_right, mode, key_col=key_col)
+        self._sync_alignment_controls()
+        self._populate()
+        self.alignment_changed.emit()
+
     def _make_table(self, _name: str) -> QTableWidget:
         t = QTableWidget()
         t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
@@ -160,6 +258,11 @@ class DiffView(QWidget):
         rows = max(sd.max_row, 1)
         cols = max(sd.max_col, 1)
 
+        if self._cap_banner is not None:
+            self._cap_banner.setParent(None)
+            self._cap_banner.deleteLater()
+            self._cap_banner = None
+
         if rows * cols > MAX_DISPLAY_CELLS:
             if sd.diffs:
                 rows = max(k[0] for k in sd.diffs)
@@ -177,15 +280,28 @@ class DiffView(QWidget):
                 f"Las celdas fuera de este rango siguen en el fichero pero no son editables aquí."
             ))
             self.layout().insertWidget(0, cap_banner)
+            self._cap_banner = cap_banner
 
         col_labels = [get_column_letter(i + 1) for i in range(cols)]
-        for tbl in (self.left_table, self.right_table):
+        # Per-side row labels: each side shows its own Excel row number; gap = "—"
+        left_row_labels = []
+        right_row_labels = []
+        for v_idx in range(1, rows + 1):
+            lr, rr = sd.excel_rows_at(v_idx) if sd.aligned_rows else (v_idx, v_idx)
+            left_row_labels.append(str(lr) if lr is not None else "—")
+            right_row_labels.append(str(rr) if rr is not None else "—")
+
+        for tbl, row_labels in (
+            (self.left_table, left_row_labels),
+            (self.right_table, right_row_labels),
+        ):
             self._programmatic = True
             tbl.blockSignals(True)
             tbl.clear()
             tbl.setRowCount(rows)
             tbl.setColumnCount(cols)
             tbl.setHorizontalHeaderLabels(col_labels)
+            tbl.setVerticalHeaderLabels(row_labels)
             tbl.blockSignals(False)
             self._programmatic = False
 
@@ -193,12 +309,16 @@ class DiffView(QWidget):
         self._programmatic = True
         self.left_table.blockSignals(True)
         self.right_table.blockSignals(True)
-        for r in range(1, rows + 1):
+        for v_idx in range(1, rows + 1):
+            if sd.aligned_rows:
+                lr, rr = sd.excel_rows_at(v_idx)
+            else:
+                lr, rr = v_idx, v_idx
             for c in range(1, cols + 1):
-                lv = self.ws_left.cell(r, c).value if self.ws_left is not None else None
-                rv = self.ws_right.cell(r, c).value if self.ws_right is not None else None
-                self._set_item(self.left_table, r, c, lv)
-                self._set_item(self.right_table, r, c, rv)
+                lv = self.ws_left.cell(lr, c).value if lr is not None and self.ws_left is not None else None
+                rv = self.ws_right.cell(rr, c).value if rr is not None and self.ws_right is not None else None
+                self._set_item(self.left_table, v_idx, c, lv, editable=lr is not None)
+                self._set_item(self.right_table, v_idx, c, rv, editable=rr is not None)
         for (r, c), status in sd.diffs.items():
             self._paint(self.left_table, r, c, cell_color(status.value, "left"))
             self._paint(self.right_table, r, c, cell_color(status.value, "right"))
@@ -206,13 +326,14 @@ class DiffView(QWidget):
         self.right_table.blockSignals(False)
         self._programmatic = False
 
-    def _set_item(self, table: QTableWidget, row: int, col: int, value: Any) -> None:
-        item = QTableWidgetItem(_display_text(value))
-        item.setData(Qt.ItemDataRole.UserRole, value)
-        # tooltip with full content for long values
+    def _set_item(self, table: QTableWidget, row: int, col: int, value: Any, editable: bool = True) -> None:
         text = _display_text(value)
+        item = QTableWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, value)
         if len(text) > 20:
             item.setToolTip(text)
+        if not editable:
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         table.setItem(row - 1, col - 1, item)
 
     def _paint(self, table: QTableWidget, row: int, col: int, color: QColor) -> None:
@@ -267,42 +388,53 @@ class DiffView(QWidget):
     def _emit_selection(self, r: int, c: int) -> None:
         if r < 0 or c < 0:
             return
-        row = r + 1
+        v_row = r + 1
         col = c + 1
-        st = self.sheet_diff.diffs.get((row, col), DiffStatus.EQUAL)
-        lv = self.ws_left.cell(row, col).value if self.ws_left is not None else None
-        rv = self.ws_right.cell(row, col).value if self.ws_right is not None else None
-        self.selection_changed.emit(row, col, st.value, lv, rv)
+        lr, rr = self._excel_pair(v_row)
+        st = self.sheet_diff.diffs.get((v_row, col), DiffStatus.EQUAL)
+        lv = self.ws_left.cell(lr, col).value if lr is not None and self.ws_left is not None else None
+        rv = self.ws_right.cell(rr, col).value if rr is not None and self.ws_right is not None else None
+        self.selection_changed.emit(v_row, col, st.value, lv, rv)
+
+    # ---------- Visual <-> Excel mapping ----------
+
+    def _excel_pair(self, v_row: int) -> tuple[int | None, int | None]:
+        return self.sheet_diff.excel_rows_at(v_row)
 
     # ---------- Inline edits ----------
 
     def _on_left_edited(self, item: QTableWidgetItem) -> None:
         if self._programmatic or self.ws_left is None:
             return
-        r = item.row() + 1
+        v_row = item.row() + 1
         c = item.column() + 1
+        lr, _ = self._excel_pair(v_row)
+        if lr is None:
+            return  # gap row — shouldn't be editable
         parsed = _parse_text(item.text())
-        self.ws_left.cell(r, c).value = parsed
+        self.ws_left.cell(lr, c).value = parsed
         self._programmatic = True
         item.setData(Qt.ItemDataRole.UserRole, parsed)
-        # normalize display text
         item.setText(_display_text(parsed))
         self._programmatic = False
-        self._refresh_cell_status(r, c)
+        self._refresh_cell_status(v_row, c)
         self.left_modified.emit()
 
     def _on_right_edited(self, item: QTableWidgetItem) -> None:
         if self._programmatic or self.ws_right is None:
             return
-        r = item.row() + 1
+        v_row = item.row() + 1
         c = item.column() + 1
+        _, rr = self._excel_pair(v_row)
+        if rr is None:
+            return
         parsed = _parse_text(item.text())
-        self.ws_right.cell(r, c).value = parsed
+        self.ws_right.cell(rr, c).value = parsed
         self._programmatic = True
         item.setData(Qt.ItemDataRole.UserRole, parsed)
         item.setText(_display_text(parsed))
         self._programmatic = False
-        self._refresh_cell_status(r, c)
+        self._refresh_cell_status(v_row, c)
         self.right_modified.emit()
 
     # ---------- Copy actions (arrows) ----------
@@ -317,38 +449,51 @@ class DiffView(QWidget):
     def can_copy(self) -> bool:
         return self.sheet_diff.presence == SheetPresence.BOTH and self._current_cell() is not None
 
-    def copy_left_to_right(self) -> None:
+    def copy_left_to_right(self) -> str | None:
+        """Returns None on success, or an explanation string if the operation can't be done."""
         if self.ws_left is None or self.ws_right is None:
-            return
+            return "No hay datos para copiar."
         pos = self._current_cell()
         if pos is None:
-            return
-        r, c = pos
-        value = self.ws_left.cell(r, c).value
-        self._apply_programmatic(self.right_table, self.ws_right, r, c, value)
+            return "Selecciona una celda primero."
+        v_row, c = pos
+        lr, rr = self._excel_pair(v_row)
+        if lr is None:
+            return "A no tiene fila en esta posición — nada que copiar."
+        if rr is None:
+            return "B no tiene fila aquí. Cambia a alineación posicional o crea la fila a mano."
+        value = self.ws_left.cell(lr, c).value
+        self._apply_programmatic(self.right_table, self.ws_right, v_row, c, rr, value)
         self.right_modified.emit()
-        self._refresh_cell_status(r, c)
+        self._refresh_cell_status(v_row, c)
+        return None
 
-    def copy_right_to_left(self) -> None:
+    def copy_right_to_left(self) -> str | None:
         if self.ws_left is None or self.ws_right is None:
-            return
+            return "No hay datos para copiar."
         pos = self._current_cell()
         if pos is None:
-            return
-        r, c = pos
-        value = self.ws_right.cell(r, c).value
-        self._apply_programmatic(self.left_table, self.ws_left, r, c, value)
+            return "Selecciona una celda primero."
+        v_row, c = pos
+        lr, rr = self._excel_pair(v_row)
+        if rr is None:
+            return "B no tiene fila en esta posición — nada que copiar."
+        if lr is None:
+            return "A no tiene fila aquí. Cambia a alineación posicional o crea la fila a mano."
+        value = self.ws_right.cell(rr, c).value
+        self._apply_programmatic(self.left_table, self.ws_left, v_row, c, lr, value)
         self.left_modified.emit()
-        self._refresh_cell_status(r, c)
+        self._refresh_cell_status(v_row, c)
+        return None
 
-    def _apply_programmatic(self, table: QTableWidget, ws, r: int, c: int, value: Any) -> None:
-        ws.cell(r, c).value = value
+    def _apply_programmatic(self, table: QTableWidget, ws, v_row: int, c: int, excel_row: int, value: Any) -> None:
+        ws.cell(excel_row, c).value = value
         self._programmatic = True
         table.blockSignals(True)
-        item = table.item(r - 1, c - 1)
+        item = table.item(v_row - 1, c - 1)
         if item is None:
             item = QTableWidgetItem("")
-            table.setItem(r - 1, c - 1, item)
+            table.setItem(v_row - 1, c - 1, item)
         item.setText(_display_text(value))
         item.setData(Qt.ItemDataRole.UserRole, value)
         text = _display_text(value)
@@ -356,9 +501,13 @@ class DiffView(QWidget):
         table.blockSignals(False)
         self._programmatic = False
 
-    def _refresh_cell_status(self, r: int, c: int) -> None:
-        new_status = recompute_cell_status(self.ws_left, self.ws_right, r, c)
-        key = (r, c)
+    def _refresh_cell_status(self, v_row: int, c: int) -> None:
+        from src.core.diff_engine import cell_status  # local import to keep top tidy
+        lr, rr = self._excel_pair(v_row)
+        lv = self.ws_left.cell(lr, c).value if lr is not None and self.ws_left is not None else None
+        rv = self.ws_right.cell(rr, c).value if rr is not None and self.ws_right is not None else None
+        new_status = cell_status(lv, rv)
+        key = (v_row, c)
         if new_status == DiffStatus.EQUAL:
             self.sheet_diff.diffs.pop(key, None)
         else:
@@ -366,12 +515,12 @@ class DiffView(QWidget):
         self._programmatic = True
         self.left_table.blockSignals(True)
         self.right_table.blockSignals(True)
-        self._paint(self.left_table, r, c, cell_color(new_status.value, "left"))
-        self._paint(self.right_table, r, c, cell_color(new_status.value, "right"))
+        self._paint(self.left_table, v_row, c, cell_color(new_status.value, "left"))
+        self._paint(self.right_table, v_row, c, cell_color(new_status.value, "right"))
         self.left_table.blockSignals(False)
         self.right_table.blockSignals(False)
         self._programmatic = False
-        self._emit_selection(r - 1, c - 1)
+        self._emit_selection(v_row - 1, c - 1)
 
     # ---------- Diff navigation ----------
 
